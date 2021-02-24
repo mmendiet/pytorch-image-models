@@ -395,8 +395,9 @@ def _init_weight_goog(m, n='', fix_group_fanout=True):
         if m.bias is not None:
             m.bias.data.zero_()
     elif isinstance(m, nn.BatchNorm2d):
-        m.weight.data.fill_(1.0)
-        m.bias.data.zero_()
+        if m.affine:
+            m.weight.data.fill_(1.0)
+            m.bias.data.zero_()
     elif isinstance(m, nn.Linear):
         fan_out = m.weight.size(0)  # fan-out
         fan_in = 0

@@ -9,6 +9,7 @@ from torch.nn import functional as F
 
 from .layers import create_conv2d, drop_path, get_act_layer
 from .layers.activations import sigmoid
+from .layers.slimmable_ops_v1 import USBatchNorm2d, USConv2d, USLinear
 
 # Defaults used for Google/Tensorflow training of mobile networks /w RMSprop as per
 # papers and TF reference implementations. PT momentum equiv for TF decay is (1 - TF decay)
@@ -107,9 +108,9 @@ class SqueezeExcite(nn.Module):
                  act_layer=nn.ReLU, gate_fn=sigmoid, divisor=1, **_):
         super(SqueezeExcite, self).__init__()
         reduced_chs = make_divisible((reduced_base_chs or in_chs) * se_ratio, divisor)
-        self.conv_reduce = nn.Conv2d(in_chs, reduced_chs, 1, bias=True)
+        self.conv_reduce = USConv2d(in_chs, reduced_chs, 1, bias=True)
         self.act1 = act_layer(inplace=True)
-        self.conv_expand = nn.Conv2d(reduced_chs, in_chs, 1, bias=True)
+        self.conv_expand = USConv2d(reduced_chs, in_chs, 1, bias=True)
         self.gate_fn = gate_fn
 
     def forward(self, x):

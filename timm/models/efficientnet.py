@@ -37,6 +37,7 @@ from .features import FeatureInfo, FeatureHooks
 from .helpers import build_model_with_cfg, default_cfg_for_features
 from .layers import create_conv2d, create_classifier
 from .registry import register_model
+from .layers.slimmable_ops_v1 import USBatchNorm2d, USConv2d, USLinear
 
 __all__ = ['EfficientNet']
 
@@ -330,7 +331,7 @@ class EfficientNet(nn.Module):
     def __init__(self, block_args, num_classes=1000, num_features=1280, in_chans=3, stem_size=32,
                  channel_multiplier=1.0, channel_divisor=8, channel_min=None,
                  output_stride=32, pad_type='', fix_stem=False, act_layer=nn.ReLU, drop_rate=0., drop_path_rate=0.,
-                 se_kwargs=None, norm_layer=nn.BatchNorm2d, norm_kwargs=None, global_pool='avg'):
+                 se_kwargs=None, norm_layer=USBatchNorm2d, norm_kwargs=None, global_pool='avg'):
         super(EfficientNet, self).__init__()
         norm_kwargs = norm_kwargs or {}
 
@@ -341,7 +342,8 @@ class EfficientNet(nn.Module):
         # Stem
         if not fix_stem:
             stem_size = round_channels(stem_size, channel_multiplier, channel_divisor, channel_min)
-        self.conv_stem = create_conv2d(in_chans, stem_size, 3, stride=2, padding=pad_type)
+        # self.conv_stem = create_conv2d(in_chans, stem_size, 3, stride=2, padding=pad_type)
+        self.conv_stem = USConv2d(in_chans,stem_size, 3, stride=2, padding=1, us=[False, True])
         self.bn1 = norm_layer(stem_size, **norm_kwargs)
         self.act1 = act_layer(inplace=True)
 

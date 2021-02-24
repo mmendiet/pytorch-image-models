@@ -39,14 +39,16 @@ class NativeScaler:
     def __init__(self):
         self._scaler = torch.cuda.amp.GradScaler()
 
-    def __call__(self, loss, optimizer, clip_grad=None, clip_mode='norm', parameters=None, create_graph=False):
-        self._scaler.scale(loss).backward(create_graph=create_graph)
-        if clip_grad is not None:
-            assert parameters is not None
-            self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-            dispatch_clip_grad(parameters, clip_grad, mode=clip_mode)
-        self._scaler.step(optimizer)
-        self._scaler.update()
+    def __call__(self, loss, optimizer, clip_grad=None, clip_mode='norm', parameters=None, create_graph=False, backward=True, step=True):
+        if backward:
+            self._scaler.scale(loss).backward(create_graph=create_graph)
+        if step:
+            if clip_grad is not None:
+                assert parameters is not None
+                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+                dispatch_clip_grad(parameters, clip_grad, mode=clip_mode)
+            self._scaler.step(optimizer)
+            self._scaler.update()
 
     def state_dict(self):
         return self._scaler.state_dict()

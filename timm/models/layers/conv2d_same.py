@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from typing import Tuple, Optional
 
 from .padding import pad_same, get_padding_value
+from .slimmable_ops_v1 import USConv2d
 
 
 def conv2d_same(
@@ -32,11 +33,11 @@ class Conv2dSame(nn.Conv2d):
 
 def create_conv2d_pad(in_chs, out_chs, kernel_size, **kwargs):
     padding = kwargs.pop('padding', '')
-    kwargs.setdefault('bias', False)
+    kwargs.setdefault('bias', True)
     padding, is_dynamic = get_padding_value(padding, kernel_size, **kwargs)
     if is_dynamic:
         return Conv2dSame(in_chs, out_chs, kernel_size, **kwargs)
     else:
-        return nn.Conv2d(in_chs, out_chs, kernel_size, padding=padding, **kwargs)
+        return USConv2d(in_chs, out_chs, kernel_size, padding=padding, **kwargs)
 
 
