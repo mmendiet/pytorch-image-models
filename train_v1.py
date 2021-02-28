@@ -40,6 +40,7 @@ import timm.models.layers.slimmable_ops_v1 as sov1
 import numpy as np
 import random
 import torch.nn.functional as F
+from timm.utils.model_profiling import profiling
 ##
 try:
     from apex import amp
@@ -348,6 +349,8 @@ def main():
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
+
+    profiling(model)
 
     if args.local_rank == 0:
         _logger.info('Model %s created, param count: %d' %
