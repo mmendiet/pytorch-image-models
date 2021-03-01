@@ -4,6 +4,7 @@ import torch
 width_mult_range = [0.7, 1.0]
 width_mult_list = [0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
 width_mult = width_mult_range[-1]
+resolutions = [224, 192, 160, 128]
 
 def make_divisible(v, divisor=8, min_value=1):
     """

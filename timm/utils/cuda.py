@@ -55,3 +55,11 @@ class NativeScaler:
 
     def load_state_dict(self, state_dict):
         self._scaler.load_state_dict(state_dict)
+
+# if isinstance(parameters, torch.Tensor):
+#                     param = [parameters]
+#                 param = [p for p in parameters if p.grad is not None]
+#                 device = param[0].grad.device
+#                 total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()).to(device) for p in param]))
+#  if total_norm.item() > 10:
+#                     print(total_norm)

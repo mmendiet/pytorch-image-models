@@ -40,6 +40,7 @@ import timm.models.layers.slimmable_ops_v1 as sov1
 import numpy as np
 import random
 import torch.nn.functional as F
+import ComputePostBN
 ##
 try:
     from apex import amp
@@ -56,7 +57,8 @@ try:
 except AttributeError:
     pass
 
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
+logging.basicConfig(filename='logs/3net_clip5.log')
 _logger = logging.getLogger('train')
 
 # The first arg parser parses out only the --config argument, this argument is used to
@@ -559,47 +561,52 @@ def main():
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
 
-    try:
-        for epoch in range(start_epoch, num_epochs):
-            if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
-                loader_train.sampler.set_epoch(epoch)
-
-            train_metrics = train_one_epoch(
-                epoch, model, loader_train, optimizer, train_loss_fn, args,
-                lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
-                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn)
-
-            if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                if args.local_rank == 0:
-                    _logger.info("Distributing BatchNorm running means and vars")
-                distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
-
-            eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
-
-            if model_ema is not None and not args.model_ema_force_cpu:
+    if args.resume:
+        eval_metrics = test(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, postloader=loader_train)
+        # eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
+    else:
+        try:
+            for epoch in range(start_epoch, num_epochs):
+                if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
+                    loader_train.sampler.set_epoch(epoch)
+                train_start = time.time()
+                train_metrics = train_one_epoch(
+                    epoch, model, loader_train, optimizer, train_loss_fn, args,
+                    lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
+                    amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn)
+                train_end = time.time()
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                    distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
-                ema_eval_metrics = validate(
-                    model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)')
-                eval_metrics = ema_eval_metrics
+                    if args.local_rank == 0:
+                        _logger.info("Distributing BatchNorm running means and vars")
+                    distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
+                val_start = time.time()
+                eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
+                val_end = time.time()
+                if model_ema is not None and not args.model_ema_force_cpu:
+                    if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                        distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
+                    ema_eval_metrics = validate(
+                        model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)')
+                    eval_metrics = ema_eval_metrics
+                ema_end = time.time()
+                if lr_scheduler is not None:
+                    # step LR for next epoch
+                    lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
 
-            if lr_scheduler is not None:
-                # step LR for next epoch
-                lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
+                update_summary(
+                    epoch, train_metrics, eval_metrics, os.path.join(output_dir, 'summary.csv'),
+                    write_header=best_metric is None)
 
-            update_summary(
-                epoch, train_metrics, eval_metrics, os.path.join(output_dir, 'summary.csv'),
-                write_header=best_metric is None)
-
-            if saver is not None:
-                # save proper checkpoint with eval metric
-                save_metric = eval_metrics[eval_metric]
-                best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric)
-
-    except KeyboardInterrupt:
-        pass
-    if best_metric is not None:
-        _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
+                if saver is not None:
+                    # save proper checkpoint with eval metric
+                    save_metric = eval_metrics[eval_metric]
+                    best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric)
+                final_time = time.time()
+                _logger.info('Train: {}s, Val: {}s, EMA: {}s, ALL: {}s'.format(train_end-train_start, val_end-val_start, ema_end-val_end, final_time-train_start))
+        except KeyboardInterrupt:
+            pass
+        if best_metric is not None:
+            _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
 
 
 def train_one_epoch(
@@ -619,7 +626,7 @@ def train_one_epoch(
     losses_m = AverageMeter()
 
     model.train()
-    resolutions = [224, 192, 160, 128]
+    resolutions = sov1.resolutions
 
     end = time.time()
     last_idx = len(loader) - 1
@@ -641,27 +648,28 @@ def train_one_epoch(
         with amp_autocast():
             output = model(input)
             loss = loss_fn(output, target)
-            loss_scaler(
-                loss, optimizer,
-                clip_grad=args.clip_grad, clip_mode=args.clip_mode,
-                parameters=model_parameters(model, exclude_head='agc' in args.clip_mode),
-                create_graph=second_order, step=False)
-            ################################################
-            # do other widths and resolution
-            max_output_detach = output.detach()
-            min_width = sov1.width_mult_range[0]
-            width_mult_list = [min_width]
-            sampled_width = list(np.random.uniform(sov1.width_mult_range[0], sov1.width_mult_range[1], 2))
-            width_mult_list.extend(sampled_width)
-            for width_mult in sorted(width_mult_list, reverse=True):
-                model.apply(
-                    lambda m: setattr(m, 'width_mult', width_mult))
-                reso_idx = random.randint(0, len(resolutions)-1)
+        loss_scaler(
+            loss, optimizer,
+            clip_grad=args.clip_grad, clip_mode=args.clip_mode,
+            parameters=model_parameters(model, exclude_head='agc' in args.clip_mode),
+            create_graph=second_order, step=False)
+
+        ################################################
+        # do other widths and resolution
+        max_output_detach = output.detach()
+        width_mult_list = [sov1.width_mult_range[0]]
+        sampled_width = list(np.random.uniform(sov1.width_mult_range[0], sov1.width_mult_range[-1], 2))
+        width_mult_list.extend(sampled_width)
+        for width_mult in sorted(width_mult_list, reverse=True):
+            model.apply(
+                lambda m: setattr(m, 'width_mult', width_mult))
+            reso_idx = random.randint(0, len(resolutions)-1)
+            with amp_autocast():
                 output = model(F.interpolate(input, (resolutions[reso_idx], resolutions[reso_idx]), mode='bilinear', align_corners=True))
                 loss = torch.nn.KLDivLoss(reduction='batchmean')(F.log_softmax(output, dim=1), F.softmax(max_output_detach, dim=1))
-                loss_scaler(loss, optimizer,clip_grad=args.clip_grad, clip_mode=args.clip_mode,
-                    parameters=model_parameters(model, exclude_head='agc' in args.clip_mode),
-                    create_graph=second_order, step=False)
+            loss_scaler(loss, optimizer,clip_grad=args.clip_grad, clip_mode=args.clip_mode,
+                parameters=model_parameters(model, exclude_head='agc' in args.clip_mode),
+                create_graph=second_order, step=False)
             ################################################
 
         if not args.distributed:
@@ -802,6 +810,75 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
 
     return metrics
 
+def test(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='ALL', postloader=None):
+
+    model.eval()
+    resolutions = sov1.resolutions
+    end = time.time()
+    last_idx = len(loader) - 1
+    metrics = []
+    with torch.no_grad():
+        for resolution in resolutions:
+            for width_mult in sorted(sov1.width_mult_list, reverse=True):
+                batch_time_m = AverageMeter()
+                losses_m = AverageMeter()
+                top1_m = AverageMeter()
+                top5_m = AverageMeter()
+                for batch_idx, (input, target) in enumerate(loader):
+                    #####
+                    model.apply(lambda m: setattr(m, 'width_mult', width_mult))
+                    model = ComputePostBN.ComputeBN(model, postloader, resolution, amp_autocast=amp_autocast)
+                    ####
+                    last_batch = batch_idx == last_idx
+                    if not args.prefetcher:
+                        input = input.cuda()
+                        target = target.cuda()
+                    if args.channels_last:
+                        input = input.contiguous(memory_format=torch.channels_last)
+
+                    with amp_autocast():
+                        output = model(F.interpolate(input, (resolution, resolution), mode='bilinear', align_corners=True))
+                    if isinstance(output, (tuple, list)):
+                        output = output[0]
+
+                    # augmentation reduction
+                    reduce_factor = args.tta
+                    if reduce_factor > 1:
+                        output = output.unfold(0, reduce_factor, reduce_factor).mean(dim=2)
+                        target = target[0:target.size(0):reduce_factor]
+
+                    loss = loss_fn(output, target)
+                    acc1, acc5 = accuracy(output, target, topk=(1, 5))
+
+                    if args.distributed:
+                        reduced_loss = reduce_tensor(loss.data, args.world_size)
+                        acc1 = reduce_tensor(acc1, args.world_size)
+                        acc5 = reduce_tensor(acc5, args.world_size)
+                    else:
+                        reduced_loss = loss.data
+
+                    torch.cuda.synchronize()
+
+                    losses_m.update(reduced_loss.item(), input.size(0))
+                    top1_m.update(acc1.item(), output.size(0))
+                    top5_m.update(acc5.item(), output.size(0))
+
+                    batch_time_m.update(time.time() - end)
+                    end = time.time()
+                    if args.local_rank == 0 and (last_batch or batch_idx % args.log_interval == 0):
+                        log_name = 'Test ' + log_suffix
+                        _logger.info(
+                            '{0}: [{1:>4d}/{2}]  {3}:{4:.2f}x  '
+                            'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
+                            'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
+                            'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
+                            'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
+                                log_name, batch_idx, last_idx, resolution, width_mult, batch_time=batch_time_m,
+                                loss=losses_m, top1=top1_m, top5=top5_m))
+
+                metrics.append(OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)]))
+
+    return metrics
 
 if __name__ == '__main__':
     main()
