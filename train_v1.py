@@ -42,6 +42,7 @@ import random
 import torch.nn.functional as F
 import ComputePostBN
 from timm.utils.model_profiling import profiling
+import csv
 ##
 try:
     from apex import amp
@@ -59,7 +60,7 @@ except AttributeError:
     pass
 
 torch.backends.cudnn.benchmark = False
-logging.basicConfig(filename='logs/3net_clip5.log')
+logging.basicConfig(filename='logs/test.log')
 _logger = logging.getLogger('train')
 
 # The first arg parser parses out only the --config argument, this argument is used to
@@ -352,11 +353,11 @@ def main():
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
 
-    profiling(model)
-
     if args.local_rank == 0:
         _logger.info('Model %s created, param count: %d' %
                      (args.model, sum([m.numel() for m in model.parameters()])))
+        if args.resume:
+            profiling(model, '/'.join(args.resume.split('/')[:-1]))
 
     data_config = resolve_data_config(vars(args), model=model, verbose=args.local_rank == 0)
 
@@ -565,7 +566,7 @@ def main():
             f.write(args_text)
 
     if args.resume:
-        eval_metrics = test(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, postloader=loader_train)
+        eval_metrics = test(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, postloader=loader_train, saved_path='/'.join(args.resume.split('/')[:-1]))
         # eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
     else:
         try:
@@ -813,15 +814,17 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
 
     return metrics
 
-def test(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='ALL', postloader=None):
+def test(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='ALL', postloader=None, saved_path=''):
 
     model.eval()
     resolutions = sov1.resolutions
     end = time.time()
     last_idx = len(loader) - 1
     metrics = []
+    overall_csv = []
     with torch.no_grad():
         for resolution in resolutions:
+            acc_csv = [resolution]
             for width_mult in sorted(sov1.width_mult_list, reverse=True):
                 batch_time_m = AverageMeter()
                 losses_m = AverageMeter()
@@ -878,9 +881,15 @@ def test(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='ALL', 
                             'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
                                 log_name, batch_idx, last_idx, resolution, width_mult, batch_time=batch_time_m,
                                 loss=losses_m, top1=top1_m, top5=top5_m))
-
+                acc_csv.append('{:.2f}'.format(top1_m.avg))
                 metrics.append(OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)]))
-
+            overall_csv.append(acc_csv)
+    # Writes results to an easier to read csv
+    with open(os.path.join(saved_path,'accuracy.csv'), 'w') as f:
+        w = csv.writer(f)
+        w.writerow(['Acc']+['{:.2f}'.format(width) for width in sorted(sov1.width_mult_list, reverse=True)])
+        for row in overall_csv:
+            w.writerow(row)
     return metrics
 
 if __name__ == '__main__':

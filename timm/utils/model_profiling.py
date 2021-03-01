@@ -2,6 +2,9 @@ import numpy as np
 import time
 import torch
 import torch.nn as nn
+from ..models.layers import slimmable_ops_v1 as sov1
+import csv
+import os
 
 
 model_profiling_hooks = []
@@ -167,11 +170,11 @@ def model_profiling(model, height, width, batch=1, channel=3, use_cuda=True,
     model = model.to(device)
     data = data.to(device)
     model.apply(lambda m: add_profiling_hooks(m, verbose=verbose))
-    print(
-        'Item'.ljust(name_space, ' ') +
-        'params'.rjust(macs_space, ' ') +
-        'macs'.rjust(macs_space, ' ') +
-        'nanosecs'.rjust(seconds_space, ' '))
+    # print(
+    #     'Item'.ljust(name_space, ' ') +
+    #     'params'.rjust(macs_space, ' ') +
+    #     'macs'.rjust(macs_space, ' ') +
+    #     'nanosecs'.rjust(seconds_space, ' '))
     if verbose:
         print(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
@@ -179,21 +182,32 @@ def model_profiling(model, height, width, batch=1, channel=3, use_cuda=True,
     if verbose:
         print(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
-    print(
-        'Total'.ljust(name_space, ' ') +
-        '{:,}'.format(model.n_params).rjust(params_space, ' ') +
-        '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
-        '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
+    # print(
+    #     'Total'.ljust(name_space, ' ') +
+    #     '{:,}'.format(model.n_params).rjust(params_space, ' ') +
+    #     '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
+    #     '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
     remove_profiling_hooks()
     return model.n_macs, model.n_params
 
 
-def profiling(model):
-    width_list = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7]
-    resolution = 224
-    verbose = True
-    for width in width_list:
-        model.apply(lambda m: setattr(m, 'width_mult', width))
-        print('subnet {}'.format(width))
-        model_profiling(model, resolution, resolution, verbose=verbose)
-        verbose = False
+def profiling(model, saved_path):
+    """profiling on either gpu or cpu"""
+    print('Start model profiling')
+    overall_csv = []
+    for resolution in sov1.resolutions:
+        acc_csv = [resolution]
+        for width in sorted(sov1.width_mult_list, reverse=True):
+            model.apply(lambda m: setattr(m, 'width_mult', width))
+            macs, params = model_profiling(
+                model, resolution, resolution,
+                verbose=False)
+            acc_csv.append(round(macs/1e6,2))
+        overall_csv.append(acc_csv)
+    # Writes results to an easier to read csv
+    with open(os.path.join(saved_path,'flops.csv'), 'w') as f:
+        w = csv.writer(f)
+        w.writerow(['MFLOPS']+['{:.2f}'.format(width) for width in sorted(sov1.width_mult_list, reverse=True)])
+        for row in overall_csv:
+            w.writerow(row)
+    print('Finished model profiling')
