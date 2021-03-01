@@ -40,11 +40,8 @@ import timm.models.layers.slimmable_ops_v1 as sov1
 import numpy as np
 import random
 import torch.nn.functional as F
-<<<<<<< HEAD
 import ComputePostBN
-=======
 from timm.utils.model_profiling import profiling
->>>>>>> 0cd5c96e51a61fa91bcdbf5810036042c7ff827c
 ##
 try:
     from apex import amp
