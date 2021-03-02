@@ -37,7 +37,7 @@ from .features import FeatureInfo, FeatureHooks
 from .helpers import build_model_with_cfg, default_cfg_for_features
 from .layers import create_conv2d, create_classifier
 from .registry import register_model
-from .layers.slimmable_ops_v1 import USBatchNorm2d, USConv2d, USLinear
+from .layers.slimmable_ops_v2 import USBatchNorm2d, USConv2d, USLinear
 
 __all__ = ['EfficientNet']
 
@@ -343,8 +343,8 @@ class EfficientNet(nn.Module):
         if not fix_stem:
             stem_size = round_channels(stem_size, channel_multiplier, channel_divisor, channel_min)
         # self.conv_stem = create_conv2d(in_chans, stem_size, 3, stride=2, padding=pad_type)
-        self.conv_stem = USConv2d(in_chans,stem_size, 3, stride=2, padding=1, us=[False, True])
-        self.bn1 = norm_layer(stem_size, **norm_kwargs)
+        self.conv_stem = USConv2d(in_chans,stem_size, 3, stride=2, padding=1, layer_idx=0)
+        self.bn1 = norm_layer(stem_size, **norm_kwargs, layer_idx=0)
         self.act1 = act_layer(inplace=True)
 
         # Middle stages (IR/ER/DS Blocks)

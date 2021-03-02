@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from timm.models.layers.slimmable_ops_v1 import *
+from timm.models.layers.slimmable_ops_v2 import *
 def adjust_bn_layers(module):
       
     if isinstance(module, nn.BatchNorm2d):

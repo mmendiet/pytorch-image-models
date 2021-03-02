@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from typing import Tuple, Optional
 
 from .padding import pad_same, get_padding_value
-from .slimmable_ops_v1 import USConv2d
+from .slimmable_ops_v2 import USConv2d
 
 
 def conv2d_same(

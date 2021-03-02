@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 from .layers import create_conv2d, drop_path, get_act_layer
 from .layers.activations import sigmoid
-from .layers.slimmable_ops_v1 import USBatchNorm2d, USConv2d, USLinear
+from .layers.slimmable_ops_v2 import USBatchNorm2d, USConv2d, USLinear
 
 # Defaults used for Google/Tensorflow training of mobile networks /w RMSprop as per
 # papers and TF reference implementations. PT momentum equiv for TF decay is (1 - TF decay)

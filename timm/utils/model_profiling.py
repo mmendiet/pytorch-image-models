@@ -2,10 +2,12 @@ import numpy as np
 import time
 import torch
 import torch.nn as nn
-from ..models.layers import slimmable_ops_v1 as sov1
+from ..models.layers import slimmable_ops_v2 as sov2
 import csv
 import os
 
+
+cfgs = sov2.gen_subnet_cfgs()
 
 model_profiling_hooks = []
 model_profiling_speed_hooks = []
@@ -69,8 +71,30 @@ def module_profiling(self, input, output, verbose):
     # NOTE: There are some difference between type and isinstance, thus please
     # be careful.
     t = type(self)
+    # if FLAGS.dataset == 'cifar100':
+    #     reso_idx_table = {32: 0, 28: 1, 24: 2, 20: 3}
+    # else:
+    #     reso_idx_table = {224: 0, 192: 1, 160: 2, 128: 3}
+    # reso = FLAGS.image_size
+    # reso_idx = reso_idx_table[reso]
+    cfg = cfgs[self.subnet_idx]
     if isinstance(self, nn.Conv2d):
-        self.n_macs = (ins[1] * outs[1] *
+        if self.shortcut:
+            # if FLAGS.model == 'models.wideresnet' or FLAGS.model == 'models.resnet_cifar':  # basic block
+            #     shift = 1
+            # elif FLAGS.model == 'models.resnet':  # bottleneck block
+            #     if FLAGS.depth==18:
+            #         shift = 1
+            #     else:
+            #         shift = 2
+            # else:
+            #     raise ValueError('Model type error!')
+            in_channels = cfg[self.layer_idx - 1][0]
+            out_channels = cfg[self.layer_idx][1]
+        else:
+            in_channels = cfg[self.layer_idx][0]
+            out_channels = cfg[self.layer_idx][1]
+        self.n_macs = (in_channels * out_channels *
                        self.kernel_size[0] * self.kernel_size[1] *
                        outs[2] * outs[3] // self.groups) * outs[0]
         self.n_params = get_params(self)
@@ -84,7 +108,8 @@ def module_profiling(self, input, output, verbose):
         self.n_seconds = run_forward(self, input)
         self.name = conv_module_name_filter(self.__repr__())
     elif isinstance(self, nn.Linear):
-        self.n_macs = ins[1] * outs[1] * outs[0]
+        in_features = cfg[-1][1]
+        self.n_macs = in_features * outs[1] * outs[0]
         self.n_params = get_params(self)
         self.n_seconds = run_forward(self, input)
         self.name = self.__repr__()
@@ -116,11 +141,11 @@ def module_profiling(self, input, output, verbose):
             nn.ReLU6, nn.ReLU, nn.MaxPool2d,
             nn.modules.padding.ZeroPad2d, nn.modules.activation.Sigmoid,
         ]
-        # if (not getattr(self, 'ignore_model_profiling', False) and
-        #         self.n_macs == 0 and
-        #         t not in ignore_zeros_t):
-        #     print(
-        #         'WARNING: leaf module {} has zero n_macs.'.format(type(self)))
+        if (not getattr(self, 'ignore_model_profiling', False) and
+                self.n_macs == 0 and
+                t not in ignore_zeros_t):
+            print(
+                'WARNING: leaf module {} has zero n_macs.'.format(type(self)))
         return
     if verbose:
         print(
@@ -170,23 +195,24 @@ def model_profiling(model, height, width, batch=1, channel=3, use_cuda=True,
     model = model.to(device)
     data = data.to(device)
     model.apply(lambda m: add_profiling_hooks(m, verbose=verbose))
-    # print(
-    #     'Item'.ljust(name_space, ' ') +
-    #     'params'.rjust(macs_space, ' ') +
-    #     'macs'.rjust(macs_space, ' ') +
-    #     'nanosecs'.rjust(seconds_space, ' '))
+    
     if verbose:
+        print(
+        'Item'.ljust(name_space, ' ') +
+        'params'.rjust(macs_space, ' ') +
+        'macs'.rjust(macs_space, ' ') +
+        'nanosecs'.rjust(seconds_space, ' '))
         print(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
     model(data)
     if verbose:
         print(''.center(
             name_space + params_space + macs_space + seconds_space, '-'))
-    # print(
-    #     'Total'.ljust(name_space, ' ') +
-    #     '{:,}'.format(model.n_params).rjust(params_space, ' ') +
-    #     '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
-    #     '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
+        print(
+            'Total'.ljust(name_space, ' ') +
+            '{:,}'.format(model.n_params).rjust(params_space, ' ') +
+            '{:,}'.format(model.n_macs).rjust(macs_space, ' ') +
+            '{:,}'.format(model.n_seconds).rjust(seconds_space, ' '))
     remove_profiling_hooks()
     return model.n_macs, model.n_params
 
@@ -195,10 +221,12 @@ def profiling(model, saved_path):
     """profiling on either gpu or cpu"""
     print('Start model profiling')
     overall_csv = []
-    for resolution in sov1.resolutions:
+    for resolution in sov2.resolutions:
         acc_csv = [resolution]
-        for width in sorted(sov1.width_mult_list, reverse=True):
-            model.apply(lambda m: setattr(m, 'width_mult', width))
+        for subnet_idx in sorted(sov2.test_subnet_idx):
+            model.apply(
+                lambda m: setattr(m, 'subnet_idx', subnet_idx))
+            model.apply(lambda m: setattr(m, 'reso_idx', subnet_idx))
             macs, params = model_profiling(
                 model, resolution, resolution,
                 verbose=False)
@@ -207,7 +235,7 @@ def profiling(model, saved_path):
     # Writes results to an easier to read csv
     with open(os.path.join(saved_path,'flops.csv'), 'w') as f:
         w = csv.writer(f)
-        w.writerow(['MFLOPS']+['{:.2f}'.format(width) for width in sorted(sov1.width_mult_list, reverse=True)])
+        w.writerow(['MFLOPS']+['{:.2f}'.format(1-0.05*subnet_idx) for subnet_idx in sorted(sov2.test_subnet_idx)])
         for row in overall_csv:
             w.writerow(row)
     print('Finished model profiling')

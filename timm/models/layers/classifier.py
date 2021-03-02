@@ -7,7 +7,7 @@ from torch.nn import functional as F
 
 from .adaptive_avgmax_pool import SelectAdaptivePool2d
 from .linear import Linear
-from .slimmable_ops_v1 import USLinear
+from .slimmable_ops_v2 import USLinear
 
 
 def _create_pool(num_features, num_classes, pool_type='avg', use_conv=False):
@@ -29,7 +29,7 @@ def _create_fc(num_features, num_classes, pool_type='avg', use_conv=False):
     else:
         # NOTE: using my Linear wrapper that fixes AMP + torchscript casting issue
         # fc = Linear(num_features, num_classes, bias=True)
-        fc = USLinear(num_features, num_classes, bias=True, us=[True, False])
+        fc = USLinear(num_features, num_classes, bias=True)
     return fc
 
 

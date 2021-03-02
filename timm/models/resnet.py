@@ -16,6 +16,7 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from .helpers import build_model_with_cfg
 from .layers import DropBlock2d, DropPath, AvgPool2dSame, BlurPool2d, create_attn, create_classifier
 from .registry import register_model
+from .layers.slimmable_ops_v2 import USBatchNorm2d, USConv2d, USLinear
 
 __all__ = ['ResNet', 'BasicBlock', 'Bottleneck']  # model_registry will add each entrypoint fn to this
 
@@ -257,14 +258,14 @@ class BasicBlock(nn.Module):
         first_dilation = first_dilation or dilation
         use_aa = aa_layer is not None and (stride == 2 or first_dilation != dilation)
 
-        self.conv1 = nn.Conv2d(
+        self.conv1 = USConv2d(
             inplanes, first_planes, kernel_size=3, stride=1 if use_aa else stride, padding=first_dilation,
             dilation=first_dilation, bias=False)
         self.bn1 = norm_layer(first_planes)
         self.act1 = act_layer(inplace=True)
         self.aa = aa_layer(channels=first_planes, stride=stride) if use_aa else None
 
-        self.conv2 = nn.Conv2d(
+        self.conv2 = USConv2d(
             first_planes, outplanes, kernel_size=3, padding=dilation, dilation=dilation, bias=False)
         self.bn2 = norm_layer(outplanes)
 
@@ -324,18 +325,18 @@ class Bottleneck(nn.Module):
         first_dilation = first_dilation or dilation
         use_aa = aa_layer is not None and (stride == 2 or first_dilation != dilation)
 
-        self.conv1 = nn.Conv2d(inplanes, first_planes, kernel_size=1, bias=False)
+        self.conv1 = USConv2d(inplanes, first_planes, kernel_size=1, bias=False)
         self.bn1 = norm_layer(first_planes)
         self.act1 = act_layer(inplace=True)
 
-        self.conv2 = nn.Conv2d(
+        self.conv2 = USConv2d(
             first_planes, width, kernel_size=3, stride=1 if use_aa else stride,
             padding=first_dilation, dilation=first_dilation, groups=cardinality, bias=False)
         self.bn2 = norm_layer(width)
         self.act2 = act_layer(inplace=True)
         self.aa = aa_layer(channels=width, stride=stride) if use_aa else None
 
-        self.conv3 = nn.Conv2d(width, outplanes, kernel_size=1, bias=False)
+        self.conv3 = USConv2d(width, outplanes, kernel_size=1, bias=False)
         self.bn3 = norm_layer(outplanes)
 
         self.se = create_attn(attn_layer, outplanes)
@@ -394,7 +395,7 @@ def downsample_conv(
     p = get_padding(kernel_size, stride, first_dilation)
 
     return nn.Sequential(*[
-        nn.Conv2d(
+        USConv2d(
             in_channels, out_channels, kernel_size, stride=stride, padding=p, dilation=first_dilation, bias=False),
         norm_layer(out_channels)
     ])
@@ -412,7 +413,7 @@ def downsample_avg(
 
     return nn.Sequential(*[
         pool,
-        nn.Conv2d(in_channels, out_channels, 1, stride=1, padding=0, bias=False),
+        USConv2d(in_channels, out_channels, 1, stride=1, padding=0, bias=False),
         norm_layer(out_channels)
     ])
 
@@ -541,7 +542,7 @@ class ResNet(nn.Module):
     def __init__(self, block, layers, num_classes=1000, in_chans=3,
                  cardinality=1, base_width=64, stem_width=64, stem_type='',
                  output_stride=32, block_reduce_first=1, down_kernel_size=1, avg_down=False,
-                 act_layer=nn.ReLU, norm_layer=nn.BatchNorm2d, aa_layer=None, drop_rate=0.0, drop_path_rate=0.,
+                 act_layer=nn.ReLU, norm_layer=USBatchNorm2d, aa_layer=None, drop_rate=0.0, drop_path_rate=0.,
                  drop_block_rate=0., global_pool='avg', zero_init_last_bn=True, block_args=None):
         block_args = block_args or dict()
         assert output_stride in (8, 16, 32)
@@ -557,15 +558,15 @@ class ResNet(nn.Module):
             if 'tiered' in stem_type:
                 stem_chs = (3 * (stem_width // 4), stem_width)
             self.conv1 = nn.Sequential(*[
-                nn.Conv2d(in_chans, stem_chs[0], 3, stride=2, padding=1, bias=False),
+                USConv2d(in_chans, stem_chs[0], 3, stride=2, padding=1, bias=False),
                 norm_layer(stem_chs[0]),
                 act_layer(inplace=True),
-                nn.Conv2d(stem_chs[0], stem_chs[1], 3, stride=1, padding=1, bias=False),
+                USConv2d(stem_chs[0], stem_chs[1], 3, stride=1, padding=1, bias=False),
                 norm_layer(stem_chs[1]),
                 act_layer(inplace=True),
-                nn.Conv2d(stem_chs[1], inplanes, 3, stride=1, padding=1, bias=False)])
+                USConv2d(stem_chs[1], inplanes, 3, stride=1, padding=1, bias=False)])
         else:
-            self.conv1 = nn.Conv2d(in_chans, inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+            self.conv1 = USConv2d(in_chans, inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = norm_layer(inplanes)
         self.act1 = act_layer(inplace=True)
         self.feature_info = [dict(num_chs=inplanes, reduction=2, module='act1')]
@@ -592,13 +593,21 @@ class ResNet(nn.Module):
         # Head (Pooling and Classifier)
         self.num_features = 512 * block.expansion
         self.global_pool, self.fc = create_classifier(self.num_features, self.num_classes, pool_type=global_pool)
-
+        
+        layer_idx = 0
         for n, m in self.named_modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if 'downsample' in n:
+                    m.layer_idx = layer_idx-1
+                else:
+                    m.layer_idx = layer_idx
+                    layer_idx += 1
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1.)
                 nn.init.constant_(m.bias, 0.)
+                if isinstance(m, USBatchNorm2d):
+                    m.layer_idx = layer_idx-1
         if zero_init_last_bn:
             for m in self.modules():
                 if hasattr(m, 'zero_init_last_bn'):
